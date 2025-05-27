@@ -1,8 +1,7 @@
 const fetch = require('node-fetch');
 
-exports.handler = async (event, context) => {
+exports.handler = async (event) => {
   try {
-    // Default query params
     const {
       created_from = "0",
       created_to,
@@ -19,15 +18,20 @@ exports.handler = async (event, context) => {
       sort = "date-desc"
     } = event.queryStringParameters || {};
 
-    // Build the URL
-    const url = new URL('https://bulkprovider.com/adminapi/v2/orders');
+    const baseUrl = 'https://bulkprovider.com/adminapi/v2/orders';
+    const url = new URL(baseUrl);
 
-    // Append query params if present
+    // Convert limit/offset to numbers
+    const offsetNum = parseInt(offset);
+    const limitNum = parseInt(limit);
+
+    // Add required query params
     url.searchParams.append('created_from', created_from);
-    url.searchParams.append('limit', limit);
-    url.searchParams.append('offset', offset);
+    url.searchParams.append('limit', limitNum);
+    url.searchParams.append('offset', offsetNum);
     url.searchParams.append('sort', sort);
 
+    // Optional query params
     if (created_to) url.searchParams.append('created_to', created_to);
     if (order_status) url.searchParams.append('order_status', order_status);
     if (mode) url.searchParams.append('mode', mode);
@@ -38,20 +42,57 @@ exports.handler = async (event, context) => {
     if (ip_address) url.searchParams.append('ip_address', ip_address);
     if (link) url.searchParams.append('link', link);
 
-    // Make the request
+    // Fetch orders
     const response = await fetch(url.toString(), {
       method: 'GET',
       headers: {
         'Content-Type': 'application/json',
-        'X-Api-Key': process.env.API_KEY // Put your API key in Netlify environment variable
+        'X-Api-Key': process.env.API_KEY || 'your-default-api-key'
       }
     });
 
     if (!response.ok) {
-      throw new Error(`API error: ${response.status}`);
+      const errText = await response.text();
+      throw new Error(`API Error: ${response.status} ${errText}`);
     }
 
     const data = await response.json();
+
+    // Build pagination links
+    const baseApi = `${process.env.URL || 'https://eloquent-cannoli-ed1c57.netlify.app'}/.netlify/functions/getOrders`;
+    const queryParams = new URLSearchParams({
+      created_from,
+      limit: limitNum,
+      sort
+    });
+
+    // Add optional filters to pagination URLs
+    if (created_to) queryParams.append('created_to', created_to);
+    if (order_status) queryParams.append('order_status', order_status);
+    if (mode) queryParams.append('mode', mode);
+    if (service_ids) queryParams.append('service_ids', service_ids);
+    if (creation_type) queryParams.append('creation_type', creation_type);
+    if (user) queryParams.append('user', user);
+    if (provider) queryParams.append('provider', provider);
+    if (ip_address) queryParams.append('ip_address', ip_address);
+    if (link) queryParams.append('link', link);
+
+    const prevOffset = Math.max(0, offsetNum - limitNum);
+    const nextOffset = offsetNum + limitNum;
+
+    const prevUrl = `${baseApi}?${queryParams.toString()}&offset=${prevOffset}`;
+    const nextUrl = `${baseApi}?${queryParams.toString()}&offset=${nextOffset}`;
+
+    // Final output
+    const result = {
+      ...data,
+      pagination: {
+        prev_page_href: prevOffset === offsetNum ? "" : prevUrl,
+        next_page_href: nextUrl,
+        offset: offsetNum,
+        limit: limitNum
+      }
+    };
 
     return {
       statusCode: 200,
@@ -59,7 +100,7 @@ exports.handler = async (event, context) => {
         'Access-Control-Allow-Origin': '*',
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify(data)
+      body: JSON.stringify(result)
     };
 
   } catch (error) {
