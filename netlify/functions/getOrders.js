@@ -21,17 +21,16 @@ exports.handler = async (event) => {
     const baseUrl = 'https://bulkprovider.com/adminapi/v2/orders';
     const url = new URL(baseUrl);
 
-    // Convert limit/offset to numbers
     const offsetNum = parseInt(offset);
     const limitNum = parseInt(limit);
 
-    // Add required query params
+    // Add base query
     url.searchParams.append('created_from', created_from);
     url.searchParams.append('limit', limitNum);
     url.searchParams.append('offset', offsetNum);
     url.searchParams.append('sort', sort);
 
-    // Optional query params
+    // Optional filters
     if (created_to) url.searchParams.append('created_to', created_to);
     if (order_status) url.searchParams.append('order_status', order_status);
     if (mode) url.searchParams.append('mode', mode);
@@ -42,7 +41,7 @@ exports.handler = async (event) => {
     if (ip_address) url.searchParams.append('ip_address', ip_address);
     if (link) url.searchParams.append('link', link);
 
-    // Fetch orders
+    // Fetch orders from API
     const response = await fetch(url.toString(), {
       method: 'GET',
       headers: {
@@ -58,21 +57,26 @@ exports.handler = async (event) => {
 
     const data = await response.json();
 
-    // Calculate completed_time or average_time for each order
+    // Process order list
     const updatedList = data?.data?.list?.map(order => {
-      const createdTime = new Date(order.created);
-      const updatedTime = new Date(order.last_update || order.created);
-      const diffMs = updatedTime - createdTime;
+      const createdAt = order.created || order.order_created || null;
+      const updatedAt = order.last_update || order.updated || order.order_updated || null;
 
-      let minutes = 0;
-      let seconds = 0;
+      let completed_time = "0 Minutes 0 Seconds";
 
-      if (diffMs > 0) {
-        minutes = Math.floor(diffMs / 60000);
-        seconds = Math.floor((diffMs % 60000) / 1000);
+      if (createdAt && updatedAt) {
+        const createdDate = new Date(createdAt);
+        const updatedDate = new Date(updatedAt);
+
+        if (!isNaN(createdDate) && !isNaN(updatedDate)) {
+          const diffMs = updatedDate - createdDate;
+          if (diffMs > 0) {
+            const minutes = Math.floor(diffMs / 60000);
+            const seconds = Math.floor((diffMs % 60000) / 1000);
+            completed_time = `${minutes} Minutes ${seconds} Seconds`;
+          }
+        }
       }
-
-      const completed_time = `${minutes} Minutes ${seconds} Seconds`;
 
       return {
         order_id: order.id,
@@ -81,21 +85,19 @@ exports.handler = async (event) => {
         status: order.status,
         quantity: order.quantity,
         completed_time,
-        order_created: order.created,
-        order_updated: order.last_update || order.created,
+        order_created: createdAt,
+        order_updated: updatedAt,
         username: order.user
       };
     }) || [];
 
-    // Build pagination links
+    // Pagination
     const baseApi = `${process.env.URL || 'https://eloquent-cannoli-ed1c57.netlify.app'}/.netlify/functions/getOrders`;
     const queryParams = new URLSearchParams({
       created_from,
       limit: limitNum,
       sort
     });
-
-    // Add optional filters to pagination URLs
     if (created_to) queryParams.append('created_to', created_to);
     if (order_status) queryParams.append('order_status', order_status);
     if (mode) queryParams.append('mode', mode);
@@ -112,7 +114,7 @@ exports.handler = async (event) => {
     const prevUrl = `${baseApi}?${queryParams.toString()}&offset=${prevOffset}`;
     const nextUrl = `${baseApi}?${queryParams.toString()}&offset=${nextOffset}`;
 
-    // Final output
+    // Final Response
     const result = {
       data: {
         count: updatedList.length,
