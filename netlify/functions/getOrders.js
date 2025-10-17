@@ -18,14 +18,14 @@ exports.handler = async (event) => {
       sort = "date-desc"
     } = event.queryStringParameters || {};
 
-    const baseUrl = 'https://bulkprovider.com/adminapi/v2/orders'; // 🟢 Extra space fixed
+    const baseUrl = 'https://bulkprovider.com/adminapi/v2/orders'; // ✅ fixed space issue
     const url = new URL(baseUrl);
 
     // Convert limit/offset to numbers
     const offsetNum = parseInt(offset);
     const limitNum = parseInt(limit);
 
-    // Add required query params
+    // Required query params
     url.searchParams.append('created_from', created_from);
     url.searchParams.append('limit', limitNum);
     url.searchParams.append('offset', offsetNum);
@@ -42,7 +42,7 @@ exports.handler = async (event) => {
     if (ip_address) url.searchParams.append('ip_address', ip_address);
     if (link) url.searchParams.append('link', link);
 
-    // Fetch orders
+    // 🔹 Fetch from API
     const response = await fetch(url.toString(), {
       method: 'GET',
       headers: {
@@ -58,7 +58,7 @@ exports.handler = async (event) => {
 
     const data = await response.json();
 
-    // ✅ Add completed_time / average_time calculation
+    // 🔹 Calculate real completed/average time
     const orders = data?.data?.list || data?.list || [];
     const updatedOrders = orders.map(order => {
       const created = order.order_created ? new Date(order.order_created) : null;
@@ -74,20 +74,24 @@ exports.handler = async (event) => {
 
       return {
         ...order,
-        completed_time, // 🕒 Add real calculated time
-        average_time: completed_time // same for average_time
+        completed_time,
+        average_time: completed_time
       };
     });
 
-    // Build pagination links
-    const baseApi = `${process.env.URL || 'https://eloquent-cannoli-ed1c57.netlify.app'}/.netlify/functions/getOrders`;
+    // 🔹 Pagination system
+    const baseApi =
+      (process.env.URL
+        ? `${process.env.URL}/.netlify/functions/getOrders`
+        : 'https://eloquent-cannoli-ed1c57.netlify.app/.netlify/functions/getOrders');
+
     const queryParams = new URLSearchParams({
       created_from,
       limit: limitNum,
       sort
     });
 
-    // Add optional filters to pagination URLs
+    // Preserve optional filters in pagination links
     if (created_to) queryParams.append('created_to', created_to);
     if (order_status) queryParams.append('order_status', order_status);
     if (mode) queryParams.append('mode', mode);
@@ -98,13 +102,17 @@ exports.handler = async (event) => {
     if (ip_address) queryParams.append('ip_address', ip_address);
     if (link) queryParams.append('link', link);
 
-    const prevOffset = Math.max(0, offsetNum - limitNum);
+    // ✅ Fixed pagination logic
+    const prevOffset = offsetNum > 0 ? Math.max(0, offsetNum - limitNum) : 0;
     const nextOffset = offsetNum + limitNum;
 
-    const prevUrl = `${baseApi}?${queryParams.toString()}&offset=${prevOffset}`;
+    const prevUrl = prevOffset < offsetNum
+      ? `${baseApi}?${queryParams.toString()}&offset=${prevOffset}`
+      : "";
+
     const nextUrl = `${baseApi}?${queryParams.toString()}&offset=${nextOffset}`;
 
-    // Final response
+    // 🔹 Final output
     const result = {
       ...data,
       data: {
@@ -112,7 +120,7 @@ exports.handler = async (event) => {
         list: updatedOrders
       },
       pagination: {
-        prev_page_href: prevOffset === offsetNum ? "" : prevUrl,
+        prev_page_href: prevUrl,
         next_page_href: nextUrl,
         offset: offsetNum,
         limit: limitNum
