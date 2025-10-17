@@ -24,7 +24,6 @@ exports.handler = async (event) => {
     const offsetNum = parseInt(offset);
     const limitNum = parseInt(limit);
 
-    // Add query params
     url.searchParams.append('created_from', created_from);
     url.searchParams.append('limit', limitNum);
     url.searchParams.append('offset', offsetNum);
@@ -40,7 +39,6 @@ exports.handler = async (event) => {
     if (ip_address) url.searchParams.append('ip_address', ip_address);
     if (link) url.searchParams.append('link', link);
 
-    // Fetch data
     const response = await fetch(url.toString(), {
       method: 'GET',
       headers: {
@@ -56,18 +54,20 @@ exports.handler = async (event) => {
 
     const data = await response.json();
 
-    // ✅ Calculate time difference
     const ordersWithTime = data?.data?.list?.map(order => {
+      // Try different timestamps
       const created = new Date(order.created);
-      const updated = new Date(order.last_update || order.created);
+      const updated =
+        new Date(order.last_update) ||
+        (order.updated_timestamp
+          ? new Date(order.updated_timestamp * 1000)
+          : created);
 
       const diffMs = updated - created;
       const diffMinutes = Math.floor(diffMs / 60000);
       const diffSeconds = Math.floor((diffMs % 60000) / 1000);
 
       const timeTaken = `${diffMinutes} Minutes ${diffSeconds} Seconds`;
-
-      // show completed_time only if completed
       const timeKey = order.status === 'completed' ? 'completed_time' : 'average_time';
 
       return {
@@ -78,12 +78,11 @@ exports.handler = async (event) => {
         quantity: order.quantity,
         [timeKey]: timeTaken,
         order_created: order.created,
-        order_updated: order.last_update,
+        order_updated: order.last_update || null,
         username: order.user
       };
     });
 
-    // Pagination setup
     const baseApi = `${process.env.URL || 'https://eloquent-cannoli-ed1c57.netlify.app'}/.netlify/functions/getOrders`;
     const queryParams = new URLSearchParams({
       created_from,
