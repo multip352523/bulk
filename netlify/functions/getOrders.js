@@ -1,139 +1,141 @@
-const fetch = require("node-fetch");
-
-// Utility: Process orders with concurrency control
-async function processOrdersWithConcurrency(orders, apiKey, concurrency = 5) {
-  const results = [];
-  const total = orders.length;
-
-  for (let i = 0; i < total; i += concurrency) {
-    const batch = orders.slice(i, i + concurrency);
-    const promises = batch.map(async (order) => {
-      try {
-        // Skip non-completed orders early
-        if (order.status?.toLowerCase() !== "completed") {
-          return null;
-        }
-
-        const detailUrl = `https://bulkprovider.com/adminapi/v2/orders/${order.id}`;
-        const detailRes = await fetch(detailUrl, {
-          headers: {
-            "X-Api-Key": apiKey,
-          },
-        });
-
-        if (!detailRes.ok) return null;
-
-        const detailData = await detailRes.json();
-        const orderInfo = detailData?.data;
-
-        if (!orderInfo?.created || !orderInfo?.last_update) return null;
-
-        const createdTime = new Date(orderInfo.created);
-        const updatedTime = new Date(orderInfo.last_update);
-        if (isNaN(createdTime) || isNaN(updatedTime)) return null;
-
-        const diffMs = updatedTime - createdTime;
-        const diffMin = Math.floor(diffMs / 60000);
-        const diffSec = Math.floor((diffMs % 60000) / 1000);
-        const completed_time = `${diffMin} Minutes ${diffSec} Seconds`;
-
-        return {
-          order_id: orderInfo.id,
-          service_id: orderInfo.service_id,
-          service_name: orderInfo.service_name,
-          status: orderInfo.status,
-          quantity: orderInfo.quantity,
-          completed_time, // ✅ only completed_time (not average_time)
-          order_created: orderInfo.created,
-          order_updated: orderInfo.last_update,
-          username: orderInfo.user,
-        };
-      } catch (err) {
-        console.warn(`Failed to enrich order ${order.id}:`, err.message);
-        return null;
-      }
-    });
-
-    const batchResults = await Promise.all(promises);
-    results.push(...batchResults.filter(Boolean));
-  }
-
-  return results;
-}
+const fetch = require('node-fetch');
 
 exports.handler = async (event) => {
   try {
     const {
       created_from = "0",
       created_to,
-      limit = "100",   // Increased for better pagination
+      order_status,
+      mode,
+      service_ids,
+      creation_type,
+      user,
+      provider,
+      ip_address,
+      link,
+      limit = "1000",
       offset = "0",
-      sort = "date-desc",
+      sort = "date-desc"
     } = event.queryStringParameters || {};
 
-    const apiKey = process.env.API_KEY;
-    if (!apiKey) {
-      return {
-        statusCode: 500,
-        body: JSON.stringify({ error: "API_KEY is missing in environment" }),
-      };
-    }
+    const baseUrl = 'https://bulkprovider.com/adminapi/v2/orders'; // 🟢 Extra space fixed
+    const url = new URL(baseUrl);
 
-    const baseUrl = "https://bulkprovider.com/adminapi/v2/orders";
+    // Convert limit/offset to numbers
+    const offsetNum = parseInt(offset);
+    const limitNum = parseInt(limit);
 
-    // Step 1: Fetch order list
-    const listUrl = new URL(baseUrl);
-    listUrl.searchParams.append("created_from", created_from);
-    listUrl.searchParams.append("limit", limit);
-    listUrl.searchParams.append("offset", offset);
-    listUrl.searchParams.append("sort", sort);
-    if (created_to) listUrl.searchParams.append("created_to", created_to);
-    // Force only "completed" status
-    listUrl.searchParams.append("order_status", "completed");
+    // Add required query params
+    url.searchParams.append('created_from', created_from);
+    url.searchParams.append('limit', limitNum);
+    url.searchParams.append('offset', offsetNum);
+    url.searchParams.append('sort', sort);
 
-    const listRes = await fetch(listUrl.toString(), {
-      headers: { "X-Api-Key": apiKey },
+    // Optional query params
+    if (created_to) url.searchParams.append('created_to', created_to);
+    if (order_status) url.searchParams.append('order_status', order_status);
+    if (mode) url.searchParams.append('mode', mode);
+    if (service_ids) url.searchParams.append('service_ids', service_ids);
+    if (creation_type) url.searchParams.append('creation_type', creation_type);
+    if (user) url.searchParams.append('user', user);
+    if (provider) url.searchParams.append('provider', provider);
+    if (ip_address) url.searchParams.append('ip_address', ip_address);
+    if (link) url.searchParams.append('link', link);
+
+    // Fetch orders
+    const response = await fetch(url.toString(), {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Api-Key': process.env.API_KEY || 'your-default-api-key'
+      }
     });
 
-    if (!listRes.ok) {
-      const text = await listRes.text();
-      throw new Error(`List API error ${listRes.status}: ${text}`);
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`API Error: ${response.status} ${errText}`);
     }
 
-    const listData = await listRes.json();
-    const orders = listData?.data?.list || [];
+    const data = await response.json();
 
-    // Step 2: Enrich only completed orders (already filtered by API)
-    const detailedOrders = await processOrdersWithConcurrency(orders, apiKey, 5);
+    // ✅ Add completed_time / average_time calculation
+    const orders = data?.data?.list || data?.list || [];
+    const updatedOrders = orders.map(order => {
+      const created = order.order_created ? new Date(order.order_created) : null;
+      const updated = order.order_updated ? new Date(order.order_updated) : null;
+      let completed_time = "0 Minutes 0 Seconds";
 
+      if (created && updated) {
+        const diffMs = updated - created;
+        const minutes = Math.floor(diffMs / 60000);
+        const seconds = Math.floor((diffMs % 60000) / 1000);
+        completed_time = `${minutes} Minutes ${seconds} Seconds`;
+      }
+
+      return {
+        ...order,
+        completed_time, // 🕒 Add real calculated time
+        average_time: completed_time // same for average_time
+      };
+    });
+
+    // Build pagination links
+    const baseApi = `${process.env.URL || 'https://eloquent-cannoli-ed1c57.netlify.app'}/.netlify/functions/getOrders`;
+    const queryParams = new URLSearchParams({
+      created_from,
+      limit: limitNum,
+      sort
+    });
+
+    // Add optional filters to pagination URLs
+    if (created_to) queryParams.append('created_to', created_to);
+    if (order_status) queryParams.append('order_status', order_status);
+    if (mode) queryParams.append('mode', mode);
+    if (service_ids) queryParams.append('service_ids', service_ids);
+    if (creation_type) queryParams.append('creation_type', creation_type);
+    if (user) queryParams.append('user', user);
+    if (provider) queryParams.append('provider', provider);
+    if (ip_address) queryParams.append('ip_address', ip_address);
+    if (link) queryParams.append('link', link);
+
+    const prevOffset = Math.max(0, offsetNum - limitNum);
+    const nextOffset = offsetNum + limitNum;
+
+    const prevUrl = `${baseApi}?${queryParams.toString()}&offset=${prevOffset}`;
+    const nextUrl = `${baseApi}?${queryParams.toString()}&offset=${nextOffset}`;
+
+    // Final response
     const result = {
+      ...data,
       data: {
-        count: detailedOrders.length,
-        list: detailedOrders,
+        ...data.data,
+        list: updatedOrders
       },
-      pagination: listData.pagination || {
-        offset: parseInt(offset, 10) || 0,
-        limit: parseInt(limit, 10) || 100,
-      },
+      pagination: {
+        prev_page_href: prevOffset === offsetNum ? "" : prevUrl,
+        next_page_href: nextUrl,
+        offset: offsetNum,
+        limit: limitNum
+      }
     };
 
     return {
       statusCode: 200,
       headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Content-Type": "application/json",
+        'Access-Control-Allow-Origin': '*',
+        'Content-Type': 'application/json'
       },
-      body: JSON.stringify(result, null, 2),
+      body: JSON.stringify(result)
     };
-  } catch (err) {
-    console.error("Function error:", err);
+
+  } catch (error) {
     return {
       statusCode: 500,
       headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Content-Type": "application/json",
+        'Access-Control-Allow-Origin': '*',
+        'Content-Type': 'application/json'
       },
-      body: JSON.stringify({ error: err.message }),
+      body: JSON.stringify({ error: error.message })
     };
   }
 };
