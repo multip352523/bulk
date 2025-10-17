@@ -24,7 +24,7 @@ exports.handler = async (event) => {
     const offsetNum = parseInt(offset);
     const limitNum = parseInt(limit);
 
-    // add query params
+    // Add query params
     url.searchParams.append('created_from', created_from);
     url.searchParams.append('limit', limitNum);
     url.searchParams.append('offset', offsetNum);
@@ -40,7 +40,7 @@ exports.handler = async (event) => {
     if (ip_address) url.searchParams.append('ip_address', ip_address);
     if (link) url.searchParams.append('link', link);
 
-    // fetch data
+    // Fetch data
     const response = await fetch(url.toString(), {
       method: 'GET',
       headers: {
@@ -56,16 +56,20 @@ exports.handler = async (event) => {
 
     const data = await response.json();
 
-    // ✅ calculate completed_time for each order
+    // ✅ Add completed_time only for completed orders
     const ordersWithTime = data?.data?.list?.map(order => {
-      const created = new Date(order.created);
-      const updated = new Date(order.last_update || order.created);
+      let completed_time = null;
 
-      const diffMs = updated - created;
-      const diffMinutes = Math.floor(diffMs / 60000);
-      const diffSeconds = Math.floor((diffMs % 60000) / 1000);
+      if (order.status === 'completed') {
+        const created = new Date(order.created);
+        const updated = new Date(order.last_update || order.created);
 
-      const completed_time = `${diffMinutes} Minutes ${diffSeconds} Seconds`;
+        const diffMs = updated - created;
+        const diffMinutes = Math.floor(diffMs / 60000);
+        const diffSeconds = Math.floor((diffMs % 60000) / 1000);
+
+        completed_time = `${diffMinutes} Minutes ${diffSeconds} Seconds`;
+      }
 
       return {
         order_id: order.id,
@@ -80,7 +84,7 @@ exports.handler = async (event) => {
       };
     });
 
-    // pagination
+    // Pagination setup
     const baseApi = `${process.env.URL || 'https://eloquent-cannoli-ed1c57.netlify.app'}/.netlify/functions/getOrders`;
     const queryParams = new URLSearchParams({
       created_from,
