@@ -18,7 +18,7 @@ exports.handler = async (event) => {
       sort = "date-desc"
     } = event.queryStringParameters || {};
 
-    const baseUrl = 'https://bulkprovider.com/adminapi/v2/orders'; // ✅ fixed space issue
+    const baseUrl = 'https://bulkprovider.com/adminapi/v2/orders'; // ✅ no space
     const url = new URL(baseUrl);
 
     // Convert limit/offset to numbers
@@ -31,7 +31,7 @@ exports.handler = async (event) => {
     url.searchParams.append('offset', offsetNum);
     url.searchParams.append('sort', sort);
 
-    // Optional query params
+    // Optional params
     if (created_to) url.searchParams.append('created_to', created_to);
     if (order_status) url.searchParams.append('order_status', order_status);
     if (mode) url.searchParams.append('mode', mode);
@@ -42,7 +42,7 @@ exports.handler = async (event) => {
     if (ip_address) url.searchParams.append('ip_address', ip_address);
     if (link) url.searchParams.append('link', link);
 
-    // 🔹 Fetch from API
+    // Fetch data
     const response = await fetch(url.toString(), {
       method: 'GET',
       headers: {
@@ -58,14 +58,16 @@ exports.handler = async (event) => {
 
     const data = await response.json();
 
-    // 🔹 Calculate real completed/average time
-    const orders = data?.data?.list || data?.list || [];
-    const updatedOrders = orders.map(order => {
+    // 🟢 Safe list extraction
+    const list = data?.data?.list || data?.list || [];
+
+    // 🕒 Calculate real completed_time / average_time
+    const updatedList = list.map(order => {
       const created = order.order_created ? new Date(order.order_created) : null;
       const updated = order.order_updated ? new Date(order.order_updated) : null;
       let completed_time = "0 Minutes 0 Seconds";
 
-      if (created && updated) {
+      if (created && updated && updated > created) {
         const diffMs = updated - created;
         const minutes = Math.floor(diffMs / 60000);
         const seconds = Math.floor((diffMs % 60000) / 1000);
@@ -74,12 +76,12 @@ exports.handler = async (event) => {
 
       return {
         ...order,
-        completed_time,
-        average_time: completed_time
+        average_time: completed_time, // ✅ Add this
+        completed_time                // ✅ And this
       };
     });
 
-    // 🔹 Pagination system
+    // 🔹 Pagination build
     const baseApi =
       (process.env.URL
         ? `${process.env.URL}/.netlify/functions/getOrders`
@@ -91,7 +93,6 @@ exports.handler = async (event) => {
       sort
     });
 
-    // Preserve optional filters in pagination links
     if (created_to) queryParams.append('created_to', created_to);
     if (order_status) queryParams.append('order_status', order_status);
     if (mode) queryParams.append('mode', mode);
@@ -106,18 +107,19 @@ exports.handler = async (event) => {
     const prevOffset = offsetNum > 0 ? Math.max(0, offsetNum - limitNum) : 0;
     const nextOffset = offsetNum + limitNum;
 
-    const prevUrl = prevOffset < offsetNum
-      ? `${baseApi}?${queryParams.toString()}&offset=${prevOffset}`
-      : "";
+    const prevUrl =
+      prevOffset < offsetNum
+        ? `${baseApi}?${queryParams.toString()}&offset=${prevOffset}`
+        : "";
 
     const nextUrl = `${baseApi}?${queryParams.toString()}&offset=${nextOffset}`;
 
-    // 🔹 Final output
+    // 🔹 Final result
     const result = {
       ...data,
       data: {
         ...data.data,
-        list: updatedOrders
+        list: updatedList
       },
       pagination: {
         prev_page_href: prevUrl,
