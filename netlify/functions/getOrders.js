@@ -1,49 +1,22 @@
 const fetch = require("node-fetch");
 
-exports.handler = async (event) => {
-  try {
-    const {
-      created_from = "0",
-      created_to,
-      order_status,
-      limit = "1000",
-      offset = "0",
-      sort = "date-desc",
-    } = event.queryStringParameters || {};
+// Utility: Process orders with concurrency control
+async function processOrdersWithConcurrency(orders, apiKey, concurrency = 5) {
+  const results = [];
+  const total = orders.length;
 
-    const apiKey = process.env.API_KEY || "your-default-api-key";
-    const baseUrl = "https://bulkprovider.com/adminapi/v2/orders";
+  for (let i = 0; i < total; i += concurrency) {
+    const batch = orders.slice(i, i + concurrency);
+    const promises = batch.map(async (order) => {
+      try {
+        // Skip non-completed orders early
+        if (order.status?.toLowerCase() !== "completed") {
+          return null;
+        }
 
-    // Step 1: Fetch Order List
-    const listUrl = new URL(baseUrl);
-    listUrl.searchParams.append("created_from", created_from);
-    listUrl.searchParams.append("limit", limit);
-    listUrl.searchParams.append("offset", offset);
-    listUrl.searchParams.append("sort", sort);
-    if (created_to) listUrl.searchParams.append("created_to", created_to);
-    if (order_status) listUrl.searchParams.append("order_status", order_status);
-
-    const listRes = await fetch(listUrl.toString(), {
-      headers: {
-        "Content-Type": "application/json",
-        "X-Api-Key": apiKey,
-      },
-    });
-
-    if (!listRes.ok) {
-      throw new Error(`List API error: ${listRes.status}`);
-    }
-
-    const listData = await listRes.json();
-    const orders = listData?.data?.list || [];
-
-    // Step 2: For each order, get detailed data
-    const detailedOrders = await Promise.all(
-      orders.map(async (order) => {
         const detailUrl = `https://bulkprovider.com/adminapi/v2/orders/${order.id}`;
         const detailRes = await fetch(detailUrl, {
           headers: {
-            "Content-Type": "application/json",
             "X-Api-Key": apiKey,
           },
         });
@@ -57,13 +30,12 @@ exports.handler = async (event) => {
 
         const createdTime = new Date(orderInfo.created);
         const updatedTime = new Date(orderInfo.last_update);
+        if (isNaN(createdTime) || isNaN(updatedTime)) return null;
+
         const diffMs = updatedTime - createdTime;
         const diffMin = Math.floor(diffMs / 60000);
         const diffSec = Math.floor((diffMs % 60000) / 1000);
-
-        const timeTaken = `${diffMin} Minutes ${diffSec} Seconds`;
-        const timeKey =
-          orderInfo.status === "completed" ? "completed_time" : "average_time";
+        const completed_time = `${diffMin} Minutes ${diffSec} Seconds`;
 
         return {
           order_id: orderInfo.id,
@@ -71,20 +43,77 @@ exports.handler = async (event) => {
           service_name: orderInfo.service_name,
           status: orderInfo.status,
           quantity: orderInfo.quantity,
-          [timeKey]: timeTaken,
+          completed_time, // ✅ only completed_time (not average_time)
           order_created: orderInfo.created,
           order_updated: orderInfo.last_update,
           username: orderInfo.user,
         };
-      })
-    );
+      } catch (err) {
+        console.warn(`Failed to enrich order ${order.id}:`, err.message);
+        return null;
+      }
+    });
 
-    const finalList = detailedOrders.filter(Boolean);
+    const batchResults = await Promise.all(promises);
+    results.push(...batchResults.filter(Boolean));
+  }
+
+  return results;
+}
+
+exports.handler = async (event) => {
+  try {
+    const {
+      created_from = "0",
+      created_to,
+      limit = "100",   // Increased for better pagination
+      offset = "0",
+      sort = "date-desc",
+    } = event.queryStringParameters || {};
+
+    const apiKey = process.env.API_KEY;
+    if (!apiKey) {
+      return {
+        statusCode: 500,
+        body: JSON.stringify({ error: "API_KEY is missing in environment" }),
+      };
+    }
+
+    const baseUrl = "https://bulkprovider.com/adminapi/v2/orders";
+
+    // Step 1: Fetch order list
+    const listUrl = new URL(baseUrl);
+    listUrl.searchParams.append("created_from", created_from);
+    listUrl.searchParams.append("limit", limit);
+    listUrl.searchParams.append("offset", offset);
+    listUrl.searchParams.append("sort", sort);
+    if (created_to) listUrl.searchParams.append("created_to", created_to);
+    // Force only "completed" status
+    listUrl.searchParams.append("order_status", "completed");
+
+    const listRes = await fetch(listUrl.toString(), {
+      headers: { "X-Api-Key": apiKey },
+    });
+
+    if (!listRes.ok) {
+      const text = await listRes.text();
+      throw new Error(`List API error ${listRes.status}: ${text}`);
+    }
+
+    const listData = await listRes.json();
+    const orders = listData?.data?.list || [];
+
+    // Step 2: Enrich only completed orders (already filtered by API)
+    const detailedOrders = await processOrdersWithConcurrency(orders, apiKey, 5);
 
     const result = {
       data: {
-        count: finalList.length,
-        list: finalList,
+        count: detailedOrders.length,
+        list: detailedOrders,
+      },
+      pagination: listData.pagination || {
+        offset: parseInt(offset, 10) || 0,
+        limit: parseInt(limit, 10) || 100,
       },
     };
 
@@ -97,6 +126,7 @@ exports.handler = async (event) => {
       body: JSON.stringify(result, null, 2),
     };
   } catch (err) {
+    console.error("Function error:", err);
     return {
       statusCode: 500,
       headers: {
