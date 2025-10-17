@@ -1,4 +1,4 @@
-const fetch = require('node-fetch');
+const fetch = require("node-fetch");
 
 exports.handler = async (event) => {
   try {
@@ -6,136 +6,104 @@ exports.handler = async (event) => {
       created_from = "0",
       created_to,
       order_status,
-      mode,
-      service_ids,
-      creation_type,
-      user,
-      provider,
-      ip_address,
-      link,
-      limit = "1000",
+      limit = "20",
       offset = "0",
-      sort = "date-desc"
+      sort = "date-desc",
     } = event.queryStringParameters || {};
 
-    const baseUrl = 'https://bulkprovider.com/adminapi/v2/orders';
-    const url = new URL(baseUrl);
+    const apiKey = process.env.API_KEY || "your-default-api-key";
+    const baseUrl = "https://bulkprovider.com/adminapi/v2/orders";
 
-    const offsetNum = parseInt(offset);
-    const limitNum = parseInt(limit);
+    // Step 1: Fetch Order List
+    const listUrl = new URL(baseUrl);
+    listUrl.searchParams.append("created_from", created_from);
+    listUrl.searchParams.append("limit", limit);
+    listUrl.searchParams.append("offset", offset);
+    listUrl.searchParams.append("sort", sort);
+    if (created_to) listUrl.searchParams.append("created_to", created_to);
+    if (order_status) listUrl.searchParams.append("order_status", order_status);
 
-    url.searchParams.append('created_from', created_from);
-    url.searchParams.append('limit', limitNum);
-    url.searchParams.append('offset', offsetNum);
-    url.searchParams.append('sort', sort);
-
-    if (created_to) url.searchParams.append('created_to', created_to);
-    if (order_status) url.searchParams.append('order_status', order_status);
-    if (mode) url.searchParams.append('mode', mode);
-    if (service_ids) url.searchParams.append('service_ids', service_ids);
-    if (creation_type) url.searchParams.append('creation_type', creation_type);
-    if (user) url.searchParams.append('user', user);
-    if (provider) url.searchParams.append('provider', provider);
-    if (ip_address) url.searchParams.append('ip_address', ip_address);
-    if (link) url.searchParams.append('link', link);
-
-    const response = await fetch(url.toString(), {
-      method: 'GET',
+    const listRes = await fetch(listUrl.toString(), {
       headers: {
-        'Content-Type': 'application/json',
-        'X-Api-Key': process.env.API_KEY || 'your-default-api-key'
-      }
+        "Content-Type": "application/json",
+        "X-Api-Key": apiKey,
+      },
     });
 
-    if (!response.ok) {
-      const errText = await response.text();
-      throw new Error(`API Error: ${response.status} ${errText}`);
+    if (!listRes.ok) {
+      throw new Error(`List API error: ${listRes.status}`);
     }
 
-    const data = await response.json();
+    const listData = await listRes.json();
+    const orders = listData?.data?.list || [];
 
-    const ordersWithTime = data?.data?.list?.map(order => {
-      // Try different timestamps
-      const created = new Date(order.created);
-      const updated =
-        new Date(order.last_update) ||
-        (order.updated_timestamp
-          ? new Date(order.updated_timestamp * 1000)
-          : created);
+    // Step 2: For each order, get detailed data
+    const detailedOrders = await Promise.all(
+      orders.map(async (order) => {
+        const detailUrl = `https://bulkprovider.com/adminapi/v2/orders/${order.id}`;
+        const detailRes = await fetch(detailUrl, {
+          headers: {
+            "Content-Type": "application/json",
+            "X-Api-Key": apiKey,
+          },
+        });
 
-      const diffMs = updated - created;
-      const diffMinutes = Math.floor(diffMs / 60000);
-      const diffSeconds = Math.floor((diffMs % 60000) / 1000);
+        if (!detailRes.ok) return null;
 
-      const timeTaken = `${diffMinutes} Minutes ${diffSeconds} Seconds`;
-      const timeKey = order.status === 'completed' ? 'completed_time' : 'average_time';
+        const detailData = await detailRes.json();
+        const orderInfo = detailData?.data;
 
-      return {
-        order_id: order.id,
-        service_id: order.service_id,
-        service_name: order.service_name,
-        status: order.status,
-        quantity: order.quantity,
-        [timeKey]: timeTaken,
-        order_created: order.created,
-        order_updated: order.last_update || null,
-        username: order.user
-      };
-    });
+        if (!orderInfo?.created || !orderInfo?.last_update) return null;
 
-    const baseApi = `${process.env.URL || 'https://eloquent-cannoli-ed1c57.netlify.app'}/.netlify/functions/getOrders`;
-    const queryParams = new URLSearchParams({
-      created_from,
-      limit: limitNum,
-      sort
-    });
+        const createdTime = new Date(orderInfo.created);
+        const updatedTime = new Date(orderInfo.last_update);
+        const diffMs = updatedTime - createdTime;
+        const diffMin = Math.floor(diffMs / 60000);
+        const diffSec = Math.floor((diffMs % 60000) / 1000);
 
-    if (created_to) queryParams.append('created_to', created_to);
-    if (order_status) queryParams.append('order_status', order_status);
-    if (mode) queryParams.append('mode', mode);
-    if (service_ids) queryParams.append('service_ids', service_ids);
-    if (creation_type) queryParams.append('creation_type', creation_type);
-    if (user) queryParams.append('user', user);
-    if (provider) queryParams.append('provider', provider);
-    if (ip_address) queryParams.append('ip_address', ip_address);
-    if (link) queryParams.append('link', link);
+        const timeTaken = `${diffMin} Minutes ${diffSec} Seconds`;
+        const timeKey =
+          orderInfo.status === "completed" ? "completed_time" : "average_time";
 
-    const prevOffset = Math.max(0, offsetNum - limitNum);
-    const nextOffset = offsetNum + limitNum;
+        return {
+          order_id: orderInfo.id,
+          service_id: orderInfo.service_id,
+          service_name: orderInfo.service_name,
+          status: orderInfo.status,
+          quantity: orderInfo.quantity,
+          [timeKey]: timeTaken,
+          order_created: orderInfo.created,
+          order_updated: orderInfo.last_update,
+          username: orderInfo.user,
+        };
+      })
+    );
 
-    const prevUrl = `${baseApi}?${queryParams.toString()}&offset=${prevOffset}`;
-    const nextUrl = `${baseApi}?${queryParams.toString()}&offset=${nextOffset}`;
+    const finalList = detailedOrders.filter(Boolean);
 
     const result = {
       data: {
-        count: ordersWithTime?.length || 0,
-        list: ordersWithTime
+        count: finalList.length,
+        list: finalList,
       },
-      pagination: {
-        prev_page_href: prevOffset === offsetNum ? "" : prevUrl,
-        next_page_href: nextUrl,
-        offset: offsetNum,
-        limit: limitNum
-      }
     };
 
     return {
       statusCode: 200,
       headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Content-Type': 'application/json'
+        "Access-Control-Allow-Origin": "*",
+        "Content-Type": "application/json",
       },
-      body: JSON.stringify(result)
+      body: JSON.stringify(result, null, 2),
     };
-
-  } catch (error) {
+  } catch (err) {
     return {
       statusCode: 500,
       headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Content-Type': 'application/json'
+        "Access-Control-Allow-Origin": "*",
+        "Content-Type": "application/json",
       },
-      body: JSON.stringify({ error: error.message })
+      body: JSON.stringify({ error: err.message }),
     };
   }
 };
