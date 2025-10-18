@@ -13,7 +13,7 @@ exports.handler = async (event) => {
       provider,
       ip_address,
       link,
-      limit = "1000",
+      limit = "100",
       offset = "0",
       sort = "date-desc"
     } = event.queryStringParameters || {};
