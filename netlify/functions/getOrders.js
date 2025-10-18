@@ -5,7 +5,7 @@ exports.handler = async (event) => {
     const {
       created_from = "0",
       created_to,
-      limit = "100",
+      limit = "1000",
       offset = "0",
       sort = "date-desc",
     } = event.queryStringParameters || {};
