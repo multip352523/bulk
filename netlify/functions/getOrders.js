@@ -1,10 +1,15 @@
-const fetch = require('node-fetch');
+const fetch = require("node-fetch");
 
 exports.handler = async (event) => {
   try {
+    // Default date range: last 90 days
+    const today = new Date();
+    const past90 = new Date(today);
+    past90.setDate(today.getDate() - 90);
+
     const {
-      created_from = "0",
-      created_to,
+      created_from = past90.toISOString().split("T")[0],
+      created_to = today.toISOString().split("T")[0],
       order_status,
       mode,
       service_ids,
@@ -13,42 +18,40 @@ exports.handler = async (event) => {
       provider,
       ip_address,
       link,
-      limit = "1000",
+      limit = "100",
       offset = "0",
-      sort = "date-desc"
+      sort = "date-desc",
     } = event.queryStringParameters || {};
 
-    const baseUrl = 'https://bulkprovider.com/adminapi/v2/orders';
+    const baseUrl = "https://bulkprovider.com/adminapi/v2/orders";
     const url = new URL(baseUrl);
 
-    // Convert limit/offset
+    // Pagination setup
     const offsetNum = parseInt(offset);
     const limitNum = parseInt(limit);
 
-    // Required params
-    url.searchParams.append('created_from', created_from);
-    url.searchParams.append('limit', limitNum);
-    url.searchParams.append('offset', offsetNum);
-    url.searchParams.append('sort', sort);
+    // Add query params
+    url.searchParams.append("created_from", created_from);
+    url.searchParams.append("created_to", created_to);
+    url.searchParams.append("limit", limitNum);
+    url.searchParams.append("offset", offsetNum);
+    url.searchParams.append("sort", sort);
 
-    // Optional params
-    if (created_to) url.searchParams.append('created_to', created_to);
-    if (order_status) url.searchParams.append('order_status', order_status);
-    if (mode) url.searchParams.append('mode', mode);
-    if (service_ids) url.searchParams.append('service_ids', service_ids);
-    if (creation_type) url.searchParams.append('creation_type', creation_type);
-    if (user) url.searchParams.append('user', user);
-    if (provider) url.searchParams.append('provider', provider);
-    if (ip_address) url.searchParams.append('ip_address', ip_address);
-    if (link) url.searchParams.append('link', link);
+    if (order_status) url.searchParams.append("order_status", order_status);
+    if (mode) url.searchParams.append("mode", mode);
+    if (service_ids) url.searchParams.append("service_ids", service_ids);
+    if (creation_type) url.searchParams.append("creation_type", creation_type);
+    if (user) url.searchParams.append("user", user);
+    if (provider) url.searchParams.append("provider", provider);
+    if (ip_address) url.searchParams.append("ip_address", ip_address);
+    if (link) url.searchParams.append("link", link);
 
-    // Fetch orders
+    // Fetch from API
     const response = await fetch(url.toString(), {
-      method: 'GET',
       headers: {
-        'Content-Type': 'application/json',
-        'X-Api-Key': process.env.API_KEY || 'your-default-api-key'
-      }
+        "Content-Type": "application/json",
+        "X-Api-Key": process.env.API_KEY || "your-default-api-key",
+      },
     });
 
     if (!response.ok) {
@@ -56,93 +59,103 @@ exports.handler = async (event) => {
       throw new Error(`API Error: ${response.status} ${errText}`);
     }
 
-    const data = await response.json();
+    const rawData = await response.json();
 
-    // ✅ Filter only completed orders
-    const completedOrders = (data.orders || []).filter(o => o.status === 'completed');
+    // 🧠 Auto-detect order list key
+    const possibleKeys = ["orders", "data", "result", "list"];
+    let orders = [];
+    for (const key of possibleKeys) {
+      if (Array.isArray(rawData[key])) {
+        orders = rawData[key];
+        break;
+      }
+      if (rawData.data && Array.isArray(rawData.data[key])) {
+        orders = rawData.data[key];
+        break;
+      }
+    }
 
-    // ✅ Calculate completed_time (difference between order_created & order_updated)
-    const formattedOrders = completedOrders.map(order => {
+    if (!orders.length) {
+      console.log("⚠️ No orders found in API response keys:", Object.keys(rawData));
+    }
+
+    // Filter only completed orders
+    const completedOrders = orders.filter((o) => o.status === "completed");
+
+    // Calculate completed_time
+    const finalOrders = completedOrders.map((o) => {
+      const created = new Date(o.created || o.order_created || o.date);
+      const updated = new Date(o.last_update || o.updated || o.order_updated);
+
       let completed_time = "N/A";
-      try {
-        if (order.order_created && order.order_updated) {
-          const created = new Date(order.order_created);
-          const updated = new Date(order.order_updated);
-          const diff = Math.abs(updated - created);
-
-          const minutes = Math.floor(diff / 60000);
-          const seconds = Math.floor((diff % 60000) / 1000);
-          completed_time = `${minutes} Minutes ${seconds} Seconds`;
-        }
-      } catch (err) {
-        completed_time = "N/A";
+      if (!isNaN(created) && !isNaN(updated)) {
+        const diffMs = updated - created;
+        const diffMin = Math.floor(diffMs / 60000);
+        const diffSec = Math.floor((diffMs % 60000) / 1000);
+        completed_time = `${diffMin} Minutes ${diffSec} Seconds`;
       }
 
       return {
-        order_id: order.order_id,
-        service_id: order.service_id,
-        service_name: order.service_name,
-        status: order.status,
-        quantity: order.quantity,
+        order_id: o.id,
+        service_id: o.service_id,
+        service_name: o.service_name,
+        status: o.status,
+        quantity: o.quantity,
         completed_time,
-        order_created: order.order_created,
-        order_updated: order.order_updated,
-        username: order.username
+        order_created: o.created || o.order_created,
+        order_updated: o.last_update || o.order_updated,
+        username: o.user || o.username,
       };
     });
 
-    // ✅ Pagination URLs
-    const baseApi = `${process.env.URL || 'https://eloquent-cannoli-ed1c57.netlify.app'}/.netlify/functions/getOrders`;
+    // Pagination URLs
+    const baseApi = `${
+      process.env.URL || "https://eloquent-cannoli-ed1c57.netlify.app"
+    }/.netlify/functions/getOrders`;
+
     const queryParams = new URLSearchParams({
       created_from,
+      created_to,
       limit: limitNum,
-      sort
+      sort,
     });
-
-    if (created_to) queryParams.append('created_to', created_to);
-    if (order_status) queryParams.append('order_status', order_status);
-    if (mode) queryParams.append('mode', mode);
-    if (service_ids) queryParams.append('service_ids', service_ids);
-    if (creation_type) queryParams.append('creation_type', creation_type);
-    if (user) queryParams.append('user', user);
-    if (provider) queryParams.append('provider', provider);
-    if (ip_address) queryParams.append('ip_address', ip_address);
-    if (link) queryParams.append('link', link);
 
     const prevOffset = Math.max(0, offsetNum - limitNum);
     const nextOffset = offsetNum + limitNum;
 
-    const prevUrl = `${baseApi}?${queryParams.toString()}&offset=${prevOffset}`;
+    const prevUrl =
+      prevOffset === offsetNum
+        ? ""
+        : `${baseApi}?${queryParams.toString()}&offset=${prevOffset}`;
     const nextUrl = `${baseApi}?${queryParams.toString()}&offset=${nextOffset}`;
 
-    // ✅ Final output
+    // Final result
     const result = {
-      orders: formattedOrders,
+      orders: finalOrders,
       pagination: {
-        prev_page_href: prevOffset === offsetNum ? "" : prevUrl,
+        prev_page_href: prevUrl,
         next_page_href: nextUrl,
         offset: offsetNum,
-        limit: limitNum
-      }
+        limit: limitNum,
+      },
     };
 
     return {
       statusCode: 200,
       headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Content-Type': 'application/json'
+        "Access-Control-Allow-Origin": "*",
+        "Content-Type": "application/json",
       },
-      body: JSON.stringify(result)
+      body: JSON.stringify(result, null, 2),
     };
-
   } catch (error) {
     return {
       statusCode: 500,
       headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Content-Type': 'application/json'
+        "Access-Control-Allow-Origin": "*",
+        "Content-Type": "application/json",
       },
-      body: JSON.stringify({ error: error.message })
+      body: JSON.stringify({ error: error.message }),
     };
   }
 };
