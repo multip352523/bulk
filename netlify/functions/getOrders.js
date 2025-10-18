@@ -5,8 +5,7 @@ exports.handler = async (event) => {
     const {
       created_from = "0",
       created_to,
-      order_status,
-      limit = "1000",
+      limit = "100",
       offset = "0",
       sort = "date-desc",
     } = event.queryStringParameters || {};
@@ -20,8 +19,9 @@ exports.handler = async (event) => {
     listUrl.searchParams.append("limit", limit);
     listUrl.searchParams.append("offset", offset);
     listUrl.searchParams.append("sort", sort);
+    listUrl.searchParams.append("order_status", "completed"); // ✅ Only completed orders
+
     if (created_to) listUrl.searchParams.append("created_to", created_to);
-    if (order_status) listUrl.searchParams.append("order_status", order_status);
 
     const listRes = await fetch(listUrl.toString(), {
       headers: {
@@ -35,7 +35,7 @@ exports.handler = async (event) => {
     const listData = await listRes.json();
     const orders = listData?.data?.list || [];
 
-    // Step 2: Fetch order details for each
+    // Step 2: Fetch details for each completed order
     const detailedOrders = await Promise.all(
       orders.map(async (order) => {
         try {
@@ -49,30 +49,30 @@ exports.handler = async (event) => {
           if (!detailRes.ok) return null;
 
           const detailData = await detailRes.json();
-          const orderInfo = detailData?.data;
-          if (!orderInfo?.created || !orderInfo?.last_update) return null;
+          const o = detailData?.data;
 
-          const createdTime = new Date(orderInfo.created);
-          const updatedTime = new Date(orderInfo.last_update);
+          if (!o?.created || !o?.last_update || o.status !== "completed")
+            return null;
+
+          const createdTime = new Date(o.created);
+          const updatedTime = new Date(o.last_update);
+
+          if (isNaN(createdTime) || isNaN(updatedTime)) return null;
+
           const diffMs = updatedTime - createdTime;
           const diffMin = Math.floor(diffMs / 60000);
           const diffSec = Math.floor((diffMs % 60000) / 1000);
-          const timeTaken = `${diffMin} Minutes ${diffSec} Seconds`;
-          const timeKey =
-            orderInfo.status === "completed"
-              ? "completed_time"
-              : "average_time";
 
           return {
-            order_id: orderInfo.id,
-            service_id: orderInfo.service_id,
-            service_name: orderInfo.service_name,
-            status: orderInfo.status,
-            quantity: orderInfo.quantity,
-            [timeKey]: timeTaken,
-            order_created: orderInfo.created,
-            order_updated: orderInfo.last_update,
-            username: orderInfo.user,
+            order_id: o.id,
+            service_id: o.service_id,
+            service_name: o.service_name,
+            status: o.status,
+            quantity: o.quantity,
+            completed_time: `${diffMin} Minutes ${diffSec} Seconds`,
+            order_created: o.created,
+            order_updated: o.last_update,
+            username: o.user,
           };
         } catch {
           return null;
@@ -95,12 +95,14 @@ exports.handler = async (event) => {
       sort,
     });
     if (created_to) queryParams.append("created_to", created_to);
-    if (order_status) queryParams.append("order_status", order_status);
 
-    const prev_page_href = prevOffset === offsetNum ? "" : `${baseApi}?${queryParams.toString()}&offset=${prevOffset}`;
+    const prev_page_href =
+      prevOffset === offsetNum
+        ? ""
+        : `${baseApi}?${queryParams.toString()}&offset=${prevOffset}`;
     const next_page_href = `${baseApi}?${queryParams.toString()}&offset=${nextOffset}`;
 
-    // Step 4: Final response
+    // Step 4: Final Response
     const result = {
       data: {
         count: finalList.length,
