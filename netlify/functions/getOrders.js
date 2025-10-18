@@ -6,7 +6,7 @@ exports.handler = async (event) => {
       created_from = "0",
       created_to,
       order_status,
-      limit = "1000",
+      limit = "20",
       offset = "0",
       sort = "date-desc",
     } = event.queryStringParameters || {};
