@@ -13,14 +13,12 @@ exports.handler = async (event) => {
     const apiKey = process.env.API_KEY || "your-default-api-key";
     const baseUrl = "https://bulkprovider.com/adminapi/v2/orders";
 
-    // Step 1: Fetch Order List
+    // Step 1: Fetch order list
     const listUrl = new URL(baseUrl);
     listUrl.searchParams.append("created_from", created_from);
     listUrl.searchParams.append("limit", limit);
     listUrl.searchParams.append("offset", offset);
     listUrl.searchParams.append("sort", sort);
-    listUrl.searchParams.append("order_status", "completed"); // ✅ Only completed orders
-
     if (created_to) listUrl.searchParams.append("created_to", created_to);
 
     const listRes = await fetch(listUrl.toString(), {
@@ -30,87 +28,85 @@ exports.handler = async (event) => {
       },
     });
 
-    if (!listRes.ok) throw new Error(`List API error: ${listRes.status}`);
+    if (!listRes.ok) {
+      throw new Error(`List API error: ${listRes.status}`);
+    }
 
     const listData = await listRes.json();
     const orders = listData?.data?.list || [];
 
-    // Step 2: Fetch details for each completed order
+    // Step 2: Filter only completed orders
+    const completedOrders = orders.filter(
+      (o) => o.status?.toLowerCase() === "completed"
+    );
+
+    // Step 3: For each order, get detailed info + completed_time
     const detailedOrders = await Promise.all(
-      orders.map(async (order) => {
-        try {
-          const detailUrl = `https://bulkprovider.com/adminapi/v2/orders/${order.id}`;
-          const detailRes = await fetch(detailUrl, {
-            headers: {
-              "Content-Type": "application/json",
-              "X-Api-Key": apiKey,
-            },
-          });
-          if (!detailRes.ok) return null;
+      completedOrders.map(async (order) => {
+        const detailUrl = `https://bulkprovider.com/adminapi/v2/orders/${order.id}`;
+        const detailRes = await fetch(detailUrl, {
+          headers: {
+            "Content-Type": "application/json",
+            "X-Api-Key": apiKey,
+          },
+        });
 
-          const detailData = await detailRes.json();
-          const o = detailData?.data;
+        if (!detailRes.ok) return null;
+        const detailData = await detailRes.json();
+        const info = detailData?.data;
 
-          if (!o?.created || !o?.last_update || o.status !== "completed")
-            return null;
+        if (!info?.created || !info?.last_update) return null;
 
-          const createdTime = new Date(o.created);
-          const updatedTime = new Date(o.last_update);
+        const createdTime = new Date(info.created);
+        const updatedTime = new Date(info.last_update);
+        const diffMs = updatedTime - createdTime;
+        const diffMin = Math.floor(diffMs / 60000);
+        const diffSec = Math.floor((diffMs % 60000) / 1000);
+        const completedTime = `${diffMin} Minutes ${diffSec} Seconds`;
 
-          if (isNaN(createdTime) || isNaN(updatedTime)) return null;
-
-          const diffMs = updatedTime - createdTime;
-          const diffMin = Math.floor(diffMs / 60000);
-          const diffSec = Math.floor((diffMs % 60000) / 1000);
-
-          return {
-            order_id: o.id,
-            service_id: o.service_id,
-            service_name: o.service_name,
-            status: o.status,
-            quantity: o.quantity,
-            completed_time: `${diffMin} Minutes ${diffSec} Seconds`,
-            order_created: o.created,
-            order_updated: o.last_update,
-            username: o.user,
-          };
-        } catch {
-          return null;
-        }
+        return {
+          order_id: info.id,
+          service_id: info.service_id,
+          service_name: info.service_name,
+          status: info.status,
+          quantity: info.quantity,
+          completed_time: completedTime,
+          order_created: info.created,
+          order_updated: info.last_update,
+          username: info.user,
+        };
       })
     );
 
     const finalList = detailedOrders.filter(Boolean);
 
-    // Step 3: Pagination
+    // Step 4: Build pagination URLs
     const offsetNum = parseInt(offset);
     const limitNum = parseInt(limit);
-    const prevOffset = Math.max(0, offsetNum - limitNum);
     const nextOffset = offsetNum + limitNum;
+    const prevOffset = Math.max(0, offsetNum - limitNum);
 
     const baseApi = `${process.env.URL || "https://eloquent-cannoli-ed1c57.netlify.app"}/.netlify/functions/getOrders`;
+
     const queryParams = new URLSearchParams({
       created_from,
-      limit,
+      limit: limitNum,
       sort,
     });
     if (created_to) queryParams.append("created_to", created_to);
 
-    const prev_page_href =
-      prevOffset === offsetNum
-        ? ""
-        : `${baseApi}?${queryParams.toString()}&offset=${prevOffset}`;
-    const next_page_href = `${baseApi}?${queryParams.toString()}&offset=${nextOffset}`;
+    const prevUrl = `${baseApi}?${queryParams.toString()}&offset=${prevOffset}`;
+    const nextUrl = `${baseApi}?${queryParams.toString()}&offset=${nextOffset}`;
 
-    // Step 4: Final Response
+    // Step 5: Final output
     const result = {
       data: {
         count: finalList.length,
         list: finalList,
       },
       pagination: {
-        prev_page_href,
-        next_page_href,
+        prev_page_href: prevOffset === offsetNum ? "" : prevUrl,
+        next_page_href: nextUrl,
         offset: offsetNum,
         limit: limitNum,
       },
