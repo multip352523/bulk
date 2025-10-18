@@ -6,107 +6,85 @@ exports.handler = async (event) => {
       created_from = "0",
       created_to,
       order_status,
-      user,
-      limit = "100",
+      limit = "1000",
       offset = "0",
-      sort = "date-desc"
+      sort = "date-desc",
     } = event.queryStringParameters || {};
 
+    const apiKey = process.env.API_KEY || "your-default-api-key";
     const baseUrl = "https://bulkprovider.com/adminapi/v2/orders";
-    const url = new URL(baseUrl);
 
-    // Convert limit/offset to numbers
-    const offsetNum = parseInt(offset);
-    const limitNum = parseInt(limit);
+    // Step 1: Fetch Order List
+    const listUrl = new URL(baseUrl);
+    listUrl.searchParams.append("created_from", created_from);
+    listUrl.searchParams.append("limit", limit);
+    listUrl.searchParams.append("offset", offset);
+    listUrl.searchParams.append("sort", sort);
+    if (created_to) listUrl.searchParams.append("created_to", created_to);
+    if (order_status) listUrl.searchParams.append("order_status", order_status);
 
-    // Add query params
-    url.searchParams.append("created_from", created_from);
-    url.searchParams.append("limit", limitNum);
-    url.searchParams.append("offset", offsetNum);
-    url.searchParams.append("sort", sort);
-    if (created_to) url.searchParams.append("created_to", created_to);
-    if (order_status) url.searchParams.append("order_status", order_status);
-    if (user) url.searchParams.append("user", user);
-
-    // Fetch data
-    const response = await fetch(url.toString(), {
-      method: "GET",
+    const listRes = await fetch(listUrl.toString(), {
       headers: {
         "Content-Type": "application/json",
-        "X-Api-Key": process.env.API_KEY || "your-default-api-key",
+        "X-Api-Key": apiKey,
       },
     });
 
-    if (!response.ok) {
-      const errText = await response.text();
-      throw new Error(`API Error: ${response.status} ${errText}`);
+    if (!listRes.ok) {
+      throw new Error(`List API error: ${listRes.status}`);
     }
 
-    const data = await response.json();
-    const list = data?.data?.list || [];
+    const listData = await listRes.json();
+    const orders = listData?.data?.list || [];
 
-    // 🕒 Calculate completed_time & filter required fields only
-    const cleanedList = list.map((order) => {
-      const created = order.created ? new Date(order.created) : null;
-      const updated = order.last_update ? new Date(order.last_update) : null;
-      let completed_time = "";
+    // Step 2: For each order, get detailed data
+    const detailedOrders = await Promise.all(
+      orders.map(async (order) => {
+        const detailUrl = `https://bulkprovider.com/adminapi/v2/orders/${order.id}`;
+        const detailRes = await fetch(detailUrl, {
+          headers: {
+            "Content-Type": "application/json",
+            "X-Api-Key": apiKey,
+          },
+        });
 
-      if (created && updated && updated > created) {
-        const diffMs = updated - created;
-        const minutes = Math.floor(diffMs / 60000);
-        const seconds = Math.floor((diffMs % 60000) / 1000);
-        completed_time = `${minutes} Minutes ${seconds} Seconds`;
-      }
+        if (!detailRes.ok) return null;
 
-      return {
-        order_id: order.id,
-        service_id: order.service_id,
-        service_name: order.service_name,
-        status: order.status,
-        quantity: order.quantity,
-        completed_time,
-        order_created: order.created,
-        order_updated: order.last_update,
-        username: order.user,
-      };
-    });
+        const detailData = await detailRes.json();
+        const orderInfo = detailData?.data;
 
-    // 🔹 Pagination setup
-    const baseApi =
-      (process.env.URL
-        ? `${process.env.URL}/.netlify/functions/getOrders`
-        : "https://eloquent-cannoli-ed1c57.netlify.app/.netlify/functions/getOrders");
+        if (!orderInfo?.created || !orderInfo?.last_update) return null;
 
-    const queryParams = new URLSearchParams({
-      created_from,
-      limit: limitNum,
-      sort,
-    });
-    if (created_to) queryParams.append("created_to", created_to);
-    if (order_status) queryParams.append("order_status", order_status);
-    if (user) queryParams.append("user", user);
+        const createdTime = new Date(orderInfo.created);
+        const updatedTime = new Date(orderInfo.last_update);
+        const diffMs = updatedTime - createdTime;
+        const diffMin = Math.floor(diffMs / 60000);
+        const diffSec = Math.floor((diffMs % 60000) / 1000);
 
-    const prevOffset = offsetNum > 0 ? Math.max(0, offsetNum - limitNum) : 0;
-    const nextOffset = offsetNum + limitNum;
+        const timeTaken = `${diffMin} Minutes ${diffSec} Seconds`;
+        const timeKey =
+          orderInfo.status === "completed" ? "completed_time" : "average_time";
 
-    const prevUrl =
-      prevOffset < offsetNum
-        ? `${baseApi}?${queryParams.toString()}&offset=${prevOffset}`
-        : "";
+        return {
+          order_id: orderInfo.id,
+          service_id: orderInfo.service_id,
+          service_name: orderInfo.service_name,
+          status: orderInfo.status,
+          quantity: orderInfo.quantity,
+          [timeKey]: timeTaken,
+          order_created: orderInfo.created,
+          order_updated: orderInfo.last_update,
+          username: orderInfo.user,
+        };
+      })
+    );
 
-    const nextUrl = `${baseApi}?${queryParams.toString()}&offset=${nextOffset}`;
+    const finalList = detailedOrders.filter(Boolean);
 
-    // 🔹 Final Output
     const result = {
       data: {
-        count: cleanedList.length,
-        list: cleanedList,
-      },
-      pagination: {
-        prev_page_href: prevUrl,
-        next_page_href: nextUrl,
-        offset: offsetNum,
-        limit: limitNum,
+        count: finalList.length,
+        list: finalList,
       },
     };
 
@@ -118,14 +96,14 @@ exports.handler = async (event) => {
       },
       body: JSON.stringify(result, null, 2),
     };
-  } catch (error) {
+  } catch (err) {
     return {
       statusCode: 500,
       headers: {
         "Access-Control-Allow-Origin": "*",
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ error: error.message }),
+      body: JSON.stringify({ error: err.message }),
     };
   }
 };
