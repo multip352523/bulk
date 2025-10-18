@@ -6,7 +6,7 @@ exports.handler = async (event) => {
       created_from = "0",
       created_to,
       order_status,
-      limit = "1000",
+      limit = "20",
       offset = "0",
       sort = "date-desc",
     } = event.queryStringParameters || {};
@@ -30,61 +30,87 @@ exports.handler = async (event) => {
       },
     });
 
-    if (!listRes.ok) {
-      throw new Error(`List API error: ${listRes.status}`);
-    }
+    if (!listRes.ok) throw new Error(`List API error: ${listRes.status}`);
 
     const listData = await listRes.json();
     const orders = listData?.data?.list || [];
 
-    // Step 2: For each order, get detailed data
+    // Step 2: Fetch order details for each
     const detailedOrders = await Promise.all(
       orders.map(async (order) => {
-        const detailUrl = `https://bulkprovider.com/adminapi/v2/orders/${order.id}`;
-        const detailRes = await fetch(detailUrl, {
-          headers: {
-            "Content-Type": "application/json",
-            "X-Api-Key": apiKey,
-          },
-        });
+        try {
+          const detailUrl = `https://bulkprovider.com/adminapi/v2/orders/${order.id}`;
+          const detailRes = await fetch(detailUrl, {
+            headers: {
+              "Content-Type": "application/json",
+              "X-Api-Key": apiKey,
+            },
+          });
+          if (!detailRes.ok) return null;
 
-        if (!detailRes.ok) return null;
+          const detailData = await detailRes.json();
+          const orderInfo = detailData?.data;
+          if (!orderInfo?.created || !orderInfo?.last_update) return null;
 
-        const detailData = await detailRes.json();
-        const orderInfo = detailData?.data;
+          const createdTime = new Date(orderInfo.created);
+          const updatedTime = new Date(orderInfo.last_update);
+          const diffMs = updatedTime - createdTime;
+          const diffMin = Math.floor(diffMs / 60000);
+          const diffSec = Math.floor((diffMs % 60000) / 1000);
+          const timeTaken = `${diffMin} Minutes ${diffSec} Seconds`;
+          const timeKey =
+            orderInfo.status === "completed"
+              ? "completed_time"
+              : "average_time";
 
-        if (!orderInfo?.created || !orderInfo?.last_update) return null;
-
-        const createdTime = new Date(orderInfo.created);
-        const updatedTime = new Date(orderInfo.last_update);
-        const diffMs = updatedTime - createdTime;
-        const diffMin = Math.floor(diffMs / 60000);
-        const diffSec = Math.floor((diffMs % 60000) / 1000);
-
-        const timeTaken = `${diffMin} Minutes ${diffSec} Seconds`;
-        const timeKey =
-          orderInfo.status === "completed" ? "completed_time" : "average_time";
-
-        return {
-          order_id: orderInfo.id,
-          service_id: orderInfo.service_id,
-          service_name: orderInfo.service_name,
-          status: orderInfo.status,
-          quantity: orderInfo.quantity,
-          [timeKey]: timeTaken,
-          order_created: orderInfo.created,
-          order_updated: orderInfo.last_update,
-          username: orderInfo.user,
-        };
+          return {
+            order_id: orderInfo.id,
+            service_id: orderInfo.service_id,
+            service_name: orderInfo.service_name,
+            status: orderInfo.status,
+            quantity: orderInfo.quantity,
+            [timeKey]: timeTaken,
+            order_created: orderInfo.created,
+            order_updated: orderInfo.last_update,
+            username: orderInfo.user,
+          };
+        } catch {
+          return null;
+        }
       })
     );
 
     const finalList = detailedOrders.filter(Boolean);
 
+    // Step 3: Pagination
+    const offsetNum = parseInt(offset);
+    const limitNum = parseInt(limit);
+    const prevOffset = Math.max(0, offsetNum - limitNum);
+    const nextOffset = offsetNum + limitNum;
+
+    const baseApi = `${process.env.URL || "https://eloquent-cannoli-ed1c57.netlify.app"}/.netlify/functions/getOrders`;
+    const queryParams = new URLSearchParams({
+      created_from,
+      limit,
+      sort,
+    });
+    if (created_to) queryParams.append("created_to", created_to);
+    if (order_status) queryParams.append("order_status", order_status);
+
+    const prev_page_href = prevOffset === offsetNum ? "" : `${baseApi}?${queryParams.toString()}&offset=${prevOffset}`;
+    const next_page_href = `${baseApi}?${queryParams.toString()}&offset=${nextOffset}`;
+
+    // Step 4: Final response
     const result = {
       data: {
         count: finalList.length,
         list: finalList,
+      },
+      pagination: {
+        prev_page_href,
+        next_page_href,
+        offset: offsetNum,
+        limit: limitNum,
       },
     };
 
