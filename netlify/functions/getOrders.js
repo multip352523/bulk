@@ -21,17 +21,17 @@ exports.handler = async (event) => {
     const baseUrl = 'https://bulkprovider.com/adminapi/v2/orders';
     const url = new URL(baseUrl);
 
-    // Convert limit/offset to numbers
+    // Convert limit/offset
     const offsetNum = parseInt(offset);
     const limitNum = parseInt(limit);
 
-    // Add required query params
+    // Required params
     url.searchParams.append('created_from', created_from);
     url.searchParams.append('limit', limitNum);
     url.searchParams.append('offset', offsetNum);
     url.searchParams.append('sort', sort);
 
-    // Optional query params
+    // Optional params
     if (created_to) url.searchParams.append('created_to', created_to);
     if (order_status) url.searchParams.append('order_status', order_status);
     if (mode) url.searchParams.append('mode', mode);
@@ -58,7 +58,40 @@ exports.handler = async (event) => {
 
     const data = await response.json();
 
-    // Build pagination links
+    // ✅ Filter only completed orders
+    const completedOrders = (data.orders || []).filter(o => o.status === 'completed');
+
+    // ✅ Calculate completed_time (difference between order_created & order_updated)
+    const formattedOrders = completedOrders.map(order => {
+      let completed_time = "N/A";
+      try {
+        if (order.order_created && order.order_updated) {
+          const created = new Date(order.order_created);
+          const updated = new Date(order.order_updated);
+          const diff = Math.abs(updated - created);
+
+          const minutes = Math.floor(diff / 60000);
+          const seconds = Math.floor((diff % 60000) / 1000);
+          completed_time = `${minutes} Minutes ${seconds} Seconds`;
+        }
+      } catch (err) {
+        completed_time = "N/A";
+      }
+
+      return {
+        order_id: order.order_id,
+        service_id: order.service_id,
+        service_name: order.service_name,
+        status: order.status,
+        quantity: order.quantity,
+        completed_time,
+        order_created: order.order_created,
+        order_updated: order.order_updated,
+        username: order.username
+      };
+    });
+
+    // ✅ Pagination URLs
     const baseApi = `${process.env.URL || 'https://eloquent-cannoli-ed1c57.netlify.app'}/.netlify/functions/getOrders`;
     const queryParams = new URLSearchParams({
       created_from,
@@ -66,7 +99,6 @@ exports.handler = async (event) => {
       sort
     });
 
-    // Add optional filters to pagination URLs
     if (created_to) queryParams.append('created_to', created_to);
     if (order_status) queryParams.append('order_status', order_status);
     if (mode) queryParams.append('mode', mode);
@@ -83,9 +115,9 @@ exports.handler = async (event) => {
     const prevUrl = `${baseApi}?${queryParams.toString()}&offset=${prevOffset}`;
     const nextUrl = `${baseApi}?${queryParams.toString()}&offset=${nextOffset}`;
 
-    // Final output
+    // ✅ Final output
     const result = {
-      ...data,
+      orders: formattedOrders,
       pagination: {
         prev_page_href: prevOffset === offsetNum ? "" : prevUrl,
         next_page_href: nextUrl,
